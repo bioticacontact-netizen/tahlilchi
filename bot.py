@@ -3,10 +3,13 @@ import json
 import logging
 import sqlite3
 import re
+import io
+import os
 from datetime import datetime, timedelta
 
 import aiohttp
-from aiogram import Bot, Dispatcher
+from aiohttp import web
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, PollAnswer
 
@@ -88,7 +91,6 @@ def init_db():
 
 init_db()
 
-# FAQAT USHBU GURUH ADMINISTRATORLARINI TEKSHIRISH
 async def is_admin_of_chat(message: Message) -> bool:
     if not message.from_user:
         return False
@@ -158,15 +160,73 @@ def parse_newtest_command(text: str):
 
     return text[:30].strip(), text, start_time_str, duration_seconds
 
-async def generate_quiz_with_gemini(topic_or_text: str):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={GEMINI_API_KEY}"
-    yt_match = re.search(r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=[a-zA-Z0-9_-]+|youtu\.be/[a-zA-Z0-9_-]+)[^\s]*)', topic_or_text)
-    parts = []
+async def upload_file_bytes_to_gemini(session, file_bytes: bytes, mime_type="video/mp4") -> str:
+    try:
+        init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
+        headers = {
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(len(file_bytes)),
+            "X-Goog-Upload-Header-Content-Type": mime_type,
+            "Content-Type": "application/json"
+        }
+        async with session.post(init_url, headers=headers, json={"file": {"display_name": "telegram_video"}}) as resp:
+            if resp.status != 200:
+                return None
+            upload_url = resp.headers.get("X-Goog-Upload-URL")
 
-    if yt_match:
-        yt_url = yt_match.group(1).replace("youtu.be/", "www.youtube.com/watch?v=")
-        parts.append({"fileData": {"fileUri": yt_url, "mimeType": "video/*"}})
-        prompt = """
+        upload_headers = {
+            "Content-Length": str(len(file_bytes)),
+            "X-Goog-Upload-Offset": "0",
+            "X-Goog-Upload-Command": "upload, finalize"
+        }
+        async with session.post(upload_url, headers=upload_headers, data=file_bytes) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            return data.get("file", {}).get("uri")
+    except Exception as e:
+        logging.error(f"Faylni yuklashda xato: {e}")
+        return None
+
+async def generate_quiz_with_gemini(topic_or_text: str, video_bytes: bytes = None):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={GEMINI_API_KEY}"
+    connector = aiohttp.TCPConnector(ssl=False)
+    timeout = aiohttp.ClientTimeout(total=120)
+
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        parts = []
+
+        if video_bytes:
+            file_uri = await upload_file_bytes_to_gemini(session, video_bytes)
+            if file_uri:
+                parts.append({"fileData": {"fileUri": file_uri, "mimeType": "video/mp4"}})
+                prompt = f"""
+Siz professional o'qituvchi va metodistsiz. Taqdim etilgan video darsni to'liq ko'rib chiqib, unda aytilgan asosiy faktlar, qoidalar va tushunchalar asosida 5 ta sifatli test (viktorina) savolini tuzing.
+
+Dars mavzusi: {topic_or_text}
+
+Qoidalar:
+1. Har bir savolda 4 ta variant (options) bo'lsin.
+2. Har bir savol uchun faqat 1 ta to'g'ri javob indeksi (0, 1, 2 yoki 3) ko'rsatilsin (correct_option_id).
+3. Savol matni 250 belgidan, variantlar 100 belgidan oshmasin.
+4. Javobni FAQAT toza JSON formatida qaytaring:
+[
+  {{
+    "question": "Savol matni...",
+    "options": ["Variant A", "Variant B", "Variant C", "Variant D"],
+    "correct_option_id": 0
+  }}
+]
+"""
+                parts.append({"text": prompt})
+
+        if not parts:
+            yt_match = re.search(r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=[a-zA-Z0-9_-]+|youtu\.be/[a-zA-Z0-9_-]+)[^\s]*)', topic_or_text)
+            if yt_match:
+                yt_url = yt_match.group(1).replace("youtu.be/", "www.youtube.com/watch?v=")
+                parts.append({"fileData": {"fileUri": yt_url, "mimeType": "video/*"}})
+                prompt = """
 Siz professional o'qituvchi va metodistsiz. Taqdim etilgan videoni to'liq ko'rib chiqib, unda aytilgan asosiy faktlar, qoidalar va tushunchalar asosida 5 ta sifatli test (viktorina) savolini tuzing.
 
 Qoidalar:
@@ -182,9 +242,10 @@ Qoidalar:
   }
 ]
 """
-        parts.append({"text": prompt})
-    else:
-        prompt = f"""
+                parts.append({"text": prompt})
+
+        if not parts:
+            prompt = f"""
 Siz professional o'qituvchi va metodistsiz. Quyidagi mavzu/dars matni asosida 5 ta sifatli test (viktorina) savolini tuzing.
 
 Mavzu/dars:
@@ -203,14 +264,11 @@ Qoidalar:
   }}
 ]
 """
-        parts.append({"text": prompt})
+            parts.append({"text": prompt})
 
-    payload = {"contents": [{"parts": parts}]}
-    connector = aiohttp.TCPConnector(ssl=False)
-    timeout = aiohttp.ClientTimeout(total=90)
+        payload = {"contents": [{"parts": parts}]}
 
-    try:
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        try:
             async with session.post(url, json=payload) as resp:
                 if resp.status != 200:
                     err_text = await resp.text()
@@ -220,9 +278,9 @@ Qoidalar:
                 raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
                 clean_json = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
                 return json.loads(clean_json)
-    except Exception as e:
-        logging.error(f"Gemini so'rovida xatolik: {e}")
-        return None
+        except Exception as e:
+            logging.error(f"Gemini so'rovida xatolik: {e}")
+            return None
 
 def get_test_stats(test_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
@@ -316,7 +374,6 @@ def format_reminder_text(stats: dict, reminder_num: int):
 
     return text
 
-# TESTNI TO'XTATISH VA BARCHA SAVOLLARNI YOPISH
 async def close_test_polls(test_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -349,7 +406,6 @@ async def close_test_polls(test_id: int, chat_id: int):
         except Exception:
             pass
 
-# TESTNI REJALASHTIRILGAN VAQTDA YUBORISH (TOPIKGA MOSLANGAN)
 async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_title: str, questions: list, delay: int, duration_seconds: int):
     if delay > 0:
         await asyncio.sleep(delay)
@@ -415,7 +471,6 @@ async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_
     await asyncio.sleep(step)
     await close_test_polls(test_id, chat_id)
 
-# O'QUVCHILAR RO'YXATINI QO'SHISH
 @dp.message(Command("addstudents"))
 async def cmd_addstudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -475,7 +530,6 @@ async def cmd_addstudents(message: Message):
     except Exception:
         pass
 
-# RO'YXATNI KO'RISH
 @dp.message(Command("liststudents"))
 async def cmd_liststudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -500,7 +554,6 @@ async def cmd_liststudents(message: Message):
 
     await bot.send_message(chat_id, text, parse_mode="Markdown", message_thread_id=thread_id)
 
-# RO'YXATNI TOZALASH
 @dp.message(Command("clearstudents"))
 async def cmd_clearstudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -526,7 +579,6 @@ async def cmd_clearstudents(message: Message):
     except Exception:
         pass
 
-# TESTNI TO'XTATISH VA YOPISH
 @dp.message(Command("stoptest", "stop"))
 async def cmd_stoptest(message: Message):
     if not await is_admin_of_chat(message):
@@ -560,44 +612,56 @@ async def cmd_stoptest(message: Message):
     test_id = row[0]
     await close_test_polls(test_id, chat_id)
 
-# YANGI TEST BOSHLASH BUYRUG'I (TOPIKGA MOSLANGAN)
 @dp.message(Command("newtest"))
+@dp.message(F.video | F.forward_from_chat | F.forward_date)
 async def cmd_newtest(message: Message):
     if not await is_admin_of_chat(message):
-        await message.reply("⛔️ Bu buyruqdan faqat guruh administratorlari foydalanishi mumkin.")
         return
 
     chat_id = message.chat.id
     thread_id = message.message_thread_id
     if message.chat.type not in ["group", "supergroup"]:
-        await message.reply("⚠️ Iltimos, `/newtest` buyrug'ini test o'tkazmoqchi bo'lgan guruhingiz va topikingiz ichida yozing.")
+        await message.reply("⚠️ Iltimos, testni guruhingiz va topikingiz ichida boshlang.")
         return
 
-    raw_text = message.text.replace("/newtest", "").strip()
+    raw_text = (message.caption or message.text or "").strip()
+    raw_text = raw_text.replace("/newtest", "").strip()
+
+    title, content, start_time_str, duration_seconds = parse_newtest_command(raw_text)
+
+    video_bytes = None
+    target_video = message.video or (message.document if message.document and message.document.mime_type and "video" in message.document.mime_type else None)
+    
+    if target_video:
+        if target_video.file_size > 20 * 1024 * 1024:
+            size_mb = round(target_video.file_size / (1024 * 1024), 1)
+            await message.reply(
+                f"⚠️ Ushbu video hajmi {size_mb} MB (Telegram botlarida yuklash limiti 20 MB).\n\n"
+                f"Katta hajmdagi videoni to'liq ko'rib tahlil qilishi uchun uni YouTube'ga (hatto unlisted qilib) yuklab, linkini berishingiz mumkin!"
+            )
+            return
+        
+        status_msg = await bot.send_message(chat_id, "⏳ Video Telegram'dan yuklab olinmoqda va Gemini'ga yuborilmoqda...", message_thread_id=thread_id)
+        try:
+            file_info = await bot.get_file(target_video.file_id)
+            stream = io.BytesIO()
+            await bot.download_file(file_info.file_path, destination=stream)
+            video_bytes = stream.getvalue()
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Videoni yuklab olishda xatolik: {e}")
+            return
+    else:
+        status_msg = await bot.send_message(chat_id, f"⏳ Gemini **«{title}»** testi savollarini tayyorlamoqda...", message_thread_id=thread_id)
 
     try:
         await message.delete()
     except Exception:
         pass
 
-    if not raw_text:
-        return
-
-    title, content, start_time_str, duration_seconds = parse_newtest_command(raw_text)
-
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        if thread_id:
-            cursor.execute("UPDATE tests SET is_active = 0 WHERE chat_id = ? AND thread_id = ? AND is_active = 1", (chat_id, thread_id))
-        else:
-            cursor.execute("UPDATE tests SET is_active = 0 WHERE chat_id = ? AND is_active = 1", (chat_id,))
-        conn.commit()
-
-    status_msg = await bot.send_message(chat_id, f"⏳ Gemini **«{title}»** testi savollarini tayyorlamoqda...", message_thread_id=thread_id)
-    questions = await generate_quiz_with_gemini(content if content else title)
+    questions = await generate_quiz_with_gemini(content if content else title, video_bytes=video_bytes)
 
     if not questions:
-        await status_msg.edit_text("❌ Savollarni tuzishda xatolik yuz berdi. Dars mavzusini matn ko'rinishida yozib ko'ring.")
+        await status_msg.edit_text("❌ Savollarni tuzishda xatolik yuz berdi. Mavzuni matn ko'rinishida yozib ko'ring.")
         await asyncio.sleep(7)
         try:
             await status_msg.delete()
@@ -605,15 +669,19 @@ async def cmd_newtest(message: Message):
             pass
         return
 
-    delay = calculate_delay_seconds(start_time_str) if start_time_str else 0
-
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
+        if thread_id:
+            cursor.execute("UPDATE tests SET is_active = 0 WHERE chat_id = ? AND thread_id = ? AND is_active = 1", (chat_id, thread_id))
+        else:
+            cursor.execute("UPDATE tests SET is_active = 0 WHERE chat_id = ? AND is_active = 1", (chat_id,))
         cursor.execute("INSERT INTO tests (chat_id, thread_id, title, total_questions, duration_seconds) VALUES (?, ?, ?, ?, ?)", (chat_id, thread_id, title, len(questions), duration_seconds))
         test_id = cursor.lastrowid
         conn.commit()
 
+    delay = calculate_delay_seconds(start_time_str) if start_time_str else 0
     dur_hours = duration_seconds // 3600
+
     if delay > 0:
         await status_msg.edit_text(
             f"✅ **«{title}» testi ushbu topik uchun muvaffaqiyatli rejalashtirildi!**\n\n"
@@ -674,7 +742,6 @@ async def handle_poll_answer(poll_answer: PollAnswer):
         """, (student_id, poll_id, test_id, chat_id, chosen_option, is_correct))
         conn.commit()
 
-# STATISTIKANI KO'RISH (TOPIKGA MOSLANGAN)
 @dp.message(Command("stat"))
 async def cmd_stat(message: Message):
     if not await is_admin_of_chat(message):
@@ -701,12 +768,28 @@ async def cmd_stat(message: Message):
         report = format_reminder_text(stats, reminder_num=1)
         await bot.send_message(chat_id, report, message_thread_id=thread_id)
 
+# ==================== RENDER UCHUN YANGILANGAN QISM ====================
+# Render serveri botni doimiy uyg'oq saqlashi uchun ping javobi:
+async def handle_ping(request):
+    return web.Response(text="Bot is running online 24/7!")
+
+# BOTNI ISHGA TUSHIRISH (RENDER SERVERGA MOSLANGAN ASOSIY FUNKSIYA)
 async def main():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception:
         pass
-    print("Topiklar va Multi-Guruh Boti muvaffaqiyatli ishga tushdi!")
+
+    # Render serveri portini tinglaydigan fon veb-xizmati
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    print(f"Bot 24/7 server rejimida (Port: {port}) muvaffaqiyatli ishga tushdi!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
