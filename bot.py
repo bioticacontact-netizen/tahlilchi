@@ -91,6 +91,7 @@ def init_db():
 
 init_db()
 
+# FAQAT USHBU GURUH ADMINISTRATORLARINI TEKSHIRISH
 async def is_admin_of_chat(message: Message) -> bool:
     if not message.from_user:
         return False
@@ -160,6 +161,7 @@ def parse_newtest_command(text: str):
 
     return text[:30].strip(), text, start_time_str, duration_seconds
 
+# GEMINI FILES API ORQALI VIDEONI YUKLASH
 async def upload_file_bytes_to_gemini(session, file_bytes: bytes, mime_type="video/mp4") -> str:
     try:
         init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
@@ -374,6 +376,7 @@ def format_reminder_text(stats: dict, reminder_num: int):
 
     return text
 
+# TESTNI TO'XTATISH VA BARCHA SAVOLLARNI YOPISH
 async def close_test_polls(test_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -406,6 +409,7 @@ async def close_test_polls(test_id: int, chat_id: int):
         except Exception:
             pass
 
+# TESTNI REJALASHTIRILGAN VAQTDA YUBORISH
 async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_title: str, questions: list, delay: int, duration_seconds: int):
     if delay > 0:
         await asyncio.sleep(delay)
@@ -471,6 +475,7 @@ async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_
     await asyncio.sleep(step)
     await close_test_polls(test_id, chat_id)
 
+# O'QUVCHILAR RO'YXATINI QO'SHISH
 @dp.message(Command("addstudents"))
 async def cmd_addstudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -530,6 +535,7 @@ async def cmd_addstudents(message: Message):
     except Exception:
         pass
 
+# RO'YXATNI KO'RISH
 @dp.message(Command("liststudents"))
 async def cmd_liststudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -554,6 +560,7 @@ async def cmd_liststudents(message: Message):
 
     await bot.send_message(chat_id, text, parse_mode="Markdown", message_thread_id=thread_id)
 
+# RO'YXATNI TOZALASH
 @dp.message(Command("clearstudents"))
 async def cmd_clearstudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -579,6 +586,7 @@ async def cmd_clearstudents(message: Message):
     except Exception:
         pass
 
+# TESTNI TO'XTATISH VA YOPISH
 @dp.message(Command("stoptest", "stop"))
 async def cmd_stoptest(message: Message):
     if not await is_admin_of_chat(message):
@@ -603,4 +611,195 @@ async def cmd_stoptest(message: Message):
     if not row:
         msg = await bot.send_message(chat_id, "Ushbu topikda faol test mavjud emas.", message_thread_id=thread_id)
         await asyncio.sleep(5)
-        try
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        return
+
+    test_id = row[0]
+    await close_test_polls(test_id, chat_id)
+
+# FORWARD QILINGAN VIDEO YOKI POSTDAN TEST TUZISH VA YANGI TEST
+@dp.message(Command("newtest"))
+@dp.message(F.video | F.forward_from_chat | F.forward_date)
+async def cmd_newtest(message: Message):
+    if not await is_admin_of_chat(message):
+        return
+
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+    if message.chat.type not in ["group", "supergroup"]:
+        await message.reply("⚠️ Iltimos, testni guruhingiz va topikingiz ichida boshlang.")
+        return
+
+    raw_text = (message.caption or message.text or "").strip()
+    raw_text = raw_text.replace("/newtest", "").strip()
+
+    title, content, start_time_str, duration_seconds = parse_newtest_command(raw_text)
+
+    video_bytes = None
+    target_video = message.video or (message.document if message.document and message.document.mime_type and "video" in message.document.mime_type else None)
+    
+    if target_video:
+        if target_video.file_size > 20 * 1024 * 1024:
+            size_mb = round(target_video.file_size / (1024 * 1024), 1)
+            await message.reply(
+                f"⚠️ Ushbu video hajmi {size_mb} MB (Telegram botlarida yuklash limiti 20 MB).\n\n"
+                f"Katta hajmdagi videoni to'liq ko'rib tahlil qilishi uchun uni YouTube'ga (hatto unlisted qilib) yuklab, linkini berishingiz mumkin!"
+            )
+            return
+        
+        status_msg = await bot.send_message(chat_id, "⏳ Video Telegram'dan yuklab olinmoqda va Gemini'ga yuborilmoqda...", message_thread_id=thread_id)
+        try:
+            file_info = await bot.get_file(target_video.file_id)
+            stream = io.BytesIO()
+            await bot.download_file(file_info.file_path, destination=stream)
+            video_bytes = stream.getvalue()
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Videoni yuklab olishda xatolik: {e}")
+            return
+    else:
+        status_msg = await bot.send_message(chat_id, f"⏳ Gemini **«{title}»** testi savollarini tayyorlamoqda...", message_thread_id=thread_id)
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    questions = await generate_quiz_with_gemini(content if content else title, video_bytes=video_bytes)
+
+    if not questions:
+        await status_msg.edit_text("❌ Savollarni tuzishda xatolik yuz berdi. Mavzuni matn ko'rinishida yozib ko'ring.")
+        await asyncio.sleep(7)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        return
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        if thread_id:
+            cursor.execute("UPDATE tests SET is_active = 0 WHERE chat_id = ? AND thread_id = ? AND is_active = 1", (chat_id, thread_id))
+        else:
+            cursor.execute("UPDATE tests SET is_active = 0 WHERE chat_id = ? AND is_active = 1", (chat_id,))
+        cursor.execute("INSERT INTO tests (chat_id, thread_id, title, total_questions, duration_seconds) VALUES (?, ?, ?, ?, ?)", (chat_id, thread_id, title, len(questions), duration_seconds))
+        test_id = cursor.lastrowid
+        conn.commit()
+
+    delay = calculate_delay_seconds(start_time_str) if start_time_str else 0
+    dur_hours = duration_seconds // 3600
+
+    if delay > 0:
+        await status_msg.edit_text(
+            f"✅ **«{title}» testi ushbu topik uchun muvaffaqiyatli rejalashtirildi!**\n\n"
+            f"🕒 Guruhga chiqarilish vaqti: **{start_time_str}**\n"
+            f"⏳ Ishlash uchun berilgan muddat: **{dur_hours} soat**\n\n"
+            f"*(Guruh toza turishi uchun bu bildirishnoma 10 soniyadan so'ng avtomatik o'chadi)*",
+            parse_mode="Markdown"
+        )
+        await asyncio.sleep(10)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+    else:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    asyncio.create_task(run_scheduled_test(test_id, chat_id, thread_id, title, questions, delay, duration_seconds))
+
+@dp.poll_answer()
+async def handle_poll_answer(poll_answer: PollAnswer):
+    user_id = poll_answer.user.id
+    poll_id = poll_answer.poll_id
+    user_full_name = poll_answer.user.full_name
+    raw_username = poll_answer.user.username or ""
+    chosen_option = poll_answer.option_ids[0] if poll_answer.option_ids else -1
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT test_id, chat_id, correct_option_id FROM questions WHERE poll_id = ?", (poll_id,))
+        q_data = cursor.fetchone()
+        if not q_data:
+            return
+
+        test_id, chat_id, correct_option_id = q_data
+
+        cursor.execute("SELECT id FROM students WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute("SELECT id FROM students WHERE chat_id = ? AND (LOWER(full_name) = LOWER(?) OR (username != '' AND LOWER(username) = LOWER(?)))", (chat_id, user_full_name.strip(), raw_username.strip()))
+            name_row = cursor.fetchone()
+            if name_row:
+                student_id = name_row[0]
+                cursor.execute("UPDATE students SET user_id = ?, username = ? WHERE id = ?", (user_id, raw_username, student_id))
+            else:
+                cursor.execute("INSERT INTO students (chat_id, user_id, full_name, username) VALUES (?, ?, ?, ?)", (chat_id, user_id, user_full_name, raw_username))
+                student_id = cursor.lastrowid
+        else:
+            student_id = row[0]
+
+        is_correct = 1 if chosen_option == correct_option_id else 0
+        cursor.execute("""
+            INSERT OR REPLACE INTO answers (student_id, poll_id, test_id, chat_id, chosen_option, is_correct)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (student_id, poll_id, test_id, chat_id, chosen_option, is_correct))
+        conn.commit()
+
+# STATISTIKANI KO'RISH
+@dp.message(Command("stat"))
+async def cmd_stat(message: Message):
+    if not await is_admin_of_chat(message):
+        await message.reply("⛔️ Bu buyruqdan faqat guruh administratorlari foydalanishi mumkin.")
+        return
+
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        if thread_id:
+            cursor.execute("SELECT id FROM tests WHERE chat_id = ? AND thread_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 1", (chat_id, thread_id))
+        else:
+            cursor.execute("SELECT id FROM tests WHERE chat_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 1", (chat_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        await message.reply("Ushbu topikda faol test mavjud emas.")
+        return
+
+    test_id = row[0]
+    stats = get_test_stats(test_id, chat_id)
+    if stats:
+        report = format_reminder_text(stats, reminder_num=1)
+        await bot.send_message(chat_id, report, message_thread_id=thread_id)
+
+# ==================== RENDER UCHUN PING VA PORT ====================
+async def handle_ping(request):
+    return web.Response(text="Bot is running online 24/7!")
+
+# BOTNI ISHGA TUSHIRISH (PORT OCHADIGAN TO'LIQ FUNKSIYA)
+async def main():
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
+
+    # Render serverining 8080-portini ochish
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    print(f"Bot 24/7 server rejimida (Port: {port}) muvaffaqiyatli ishga tushdi!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
