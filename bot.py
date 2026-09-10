@@ -772,14 +772,13 @@ async def cmd_stat(message: Message):
 async def handle_ping(request):
     return web.Response(text="Bot is running online 24/7!")
 
-# BOTNI ISHGA TUSHIRISH (PORT OCHADIGAN TO'LIQ FUNKSIYA)
+# BOTNI ISHGA TUSHIRISH (PORT OCHADIGAN ASOSIY FUNKSIYA)
 async def main():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception:
         pass
 
-    # Render serverining 8080-portini ochish
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
