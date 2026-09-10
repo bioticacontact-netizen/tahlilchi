@@ -91,7 +91,10 @@ def init_db():
 
 init_db()
 
+# FAQAT USHBU GURUH ADMINISTRATORLARINI TEKSHIRISH
 async def is_admin_of_chat(message: Message) -> bool:
+    if message.sender_chat and message.chat and message.sender_chat.id == message.chat.id:
+        return True
     if not message.from_user:
         return False
     if message.chat.type in ["group", "supergroup"]:
@@ -99,7 +102,7 @@ async def is_admin_of_chat(message: Message) -> bool:
             member = await bot.get_chat_member(message.chat.id, message.from_user.id)
             return member.status in ["creator", "administrator"]
         except Exception:
-            return False
+            return True
     return True
 
 def calculate_delay_seconds(time_str: str) -> int:
@@ -160,6 +163,7 @@ def parse_newtest_command(text: str):
 
     return text[:30].strip(), text, start_time_str, duration_seconds
 
+# GEMINI FILES API ORQALI VIDEONI YUKLASH
 async def upload_file_bytes_to_gemini(session, file_bytes: bytes, mime_type="video/mp4") -> str:
     try:
         init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
@@ -189,6 +193,17 @@ async def upload_file_bytes_to_gemini(session, file_bytes: bytes, mime_type="vid
         logging.error(f"Faylni yuklashda xato: {e}")
         return None
 
+# ROBUST JSON PARSER
+def parse_gemini_json(text: str):
+    m = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    clean = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+    return json.loads(clean)
+
 async def generate_quiz_with_gemini(topic_or_text: str, video_bytes: bytes = None):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={GEMINI_API_KEY}"
     connector = aiohttp.TCPConnector(ssl=False)
@@ -202,19 +217,17 @@ async def generate_quiz_with_gemini(topic_or_text: str, video_bytes: bytes = Non
             if file_uri:
                 parts.append({"fileData": {"fileUri": file_uri, "mimeType": "video/mp4"}})
                 prompt = f"""
-Siz professional o'qituvchi va metodistsiz. Taqdim etilgan video darsni to'liq ko'rib chiqib, unda aytilgan asosiy faktlar, qoidalar va tushunchalar asosida 5 ta sifatli test (viktorina) savolini tuzing.
-
-Dars mavzusi: {topic_or_text}
+Siz professional o'qituvchisiz. Taqdim etilgan videoni to'liq ko'rib chiqib, undagi ma'lumotlar asosida 5 ta sifatli test savolini tuzing.
+Mavzu: {topic_or_text}
 
 Qoidalar:
 1. Har bir savolda 4 ta variant (options) bo'lsin.
 2. Har bir savol uchun faqat 1 ta to'g'ri javob indeksi (0, 1, 2 yoki 3) ko'rsatilsin (correct_option_id).
-3. Savol matni 250 belgidan, variantlar 100 belgidan oshmasin.
-4. Javobni FAQAT toza JSON formatida qaytaring:
+3. Javobni FAQAT toza JSON formatida qaytaring:
 [
   {{
     "question": "Savol matni...",
-    "options": ["Variant A", "Variant B", "Variant C", "Variant D"],
+    "options": ["A", "B", "C", "D"],
     "correct_option_id": 0
   }}
 ]
@@ -227,17 +240,12 @@ Qoidalar:
                 yt_url = yt_match.group(1).replace("youtu.be/", "www.youtube.com/watch?v=")
                 parts.append({"fileData": {"fileUri": yt_url, "mimeType": "video/*"}})
                 prompt = """
-Siz professional o'qituvchi va metodistsiz. Taqdim etilgan videoni to'liq ko'rib chiqib, unda aytilgan asosiy faktlar, qoidalar va tushunchalar asosida 5 ta sifatli test (viktorina) savolini tuzing.
-
-Qoidalar:
-1. Har bir savolda 4 ta variant (options) bo'lsin.
-2. Har bir savol uchun faqat 1 ta to'g'ri javob indeksi (0, 1, 2 yoki 3) ko'rsatilsin (correct_option_id).
-3. Savol matni 250 belgidan, har bir variant 100 belgidan oshmasin.
-4. Javobni FAQAT quyidagi toza JSON formatida qaytaring:
+Siz professional o'qituvchisiz. Ushbu YouTube darsi asosida 5 ta sifatli test savolini tuzing.
+Javobni FAQAT toza JSON formatida qaytaring:
 [
   {
     "question": "Savol matni...",
-    "options": ["Variant A", "Variant B", "Variant C", "Variant D"],
+    "options": ["A", "B", "C", "D"],
     "correct_option_id": 0
   }
 ]
@@ -246,20 +254,14 @@ Qoidalar:
 
         if not parts:
             prompt = f"""
-Siz professional o'qituvchi va metodistsiz. Quyidagi mavzu/dars matni asosida 5 ta sifatli test (viktorina) savolini tuzing.
+Siz professional o'qituvchisiz. Quyidagi mavzu bo'yicha 5 ta sifatli test savolini tuzing.
+Mavzu: {topic_or_text}
 
-Mavzu/dars:
-{topic_or_text}
-
-Qoidalar:
-1. Har bir savolda 4 ta variant (options) bo'lsin.
-2. Har bir savol uchun faqat 1 ta to'g'ri javob indeksi (0, 1, 2 yoki 3) ko'rsatilsin (correct_option_id).
-3. Savol matni 250 belgidan, har bir variant 100 belgidan oshmasin.
-4. Javobni FAQAT quyidagi toza JSON formatida qaytaring:
+Javobni FAQAT toza JSON formatida qaytaring:
 [
   {{
     "question": "Savol matni...",
-    "options": ["Variant A", "Variant B", "Variant C", "Variant D"],
+    "options": ["A", "B", "C", "D"],
     "correct_option_id": 0
   }}
 ]
@@ -276,8 +278,7 @@ Qoidalar:
                     return None
                 data = await resp.json()
                 raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-                clean_json = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
-                return json.loads(clean_json)
+                return parse_gemini_json(raw_text)
         except Exception as e:
             logging.error(f"Gemini so'rovida xatolik: {e}")
             return None
@@ -374,7 +375,6 @@ def format_reminder_text(stats: dict, reminder_num: int):
 
     return text
 
-# TESTNI TO'XTATISH VA BARCHA SAVOLLARNI YOPISH
 async def close_test_polls(test_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -407,7 +407,6 @@ async def close_test_polls(test_id: int, chat_id: int):
         except Exception:
             pass
 
-# TESTNI REJALASHTIRILGAN VAQTDA YUBORISH
 async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_title: str, questions: list, delay: int, duration_seconds: int):
     if delay > 0:
         await asyncio.sleep(delay)
@@ -472,6 +471,23 @@ async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_
 
     await asyncio.sleep(step)
     await close_test_polls(test_id, chat_id)
+
+# START VA SALOMLASHISH BUYRUG'I
+@dp.message(Command("start", "help"))
+async def cmd_start(message: Message):
+    await message.reply(
+        "👋 **Assalomu alaykum!**\n\n"
+        "Men **Biotica Edu** o'quv-nazorat va test tizimi botiman.\n\n"
+        "✅ **Bot serverda 24/7 faol ishlamoqda!**\n\n"
+        "📌 **Asosiy buyruqlar (Guruh adminlari uchun):**\n"
+        "• `/newtest <Dars nomi> | muddat: 3h | Mavzu...` — yangi test boshlash\n"
+        "• `/stat` — statistika va natijalarni ko'rish\n"
+        "• `/stoptest` — faol testni to'xtatish\n"
+        "• `/addstudents` — o'quvchilar ro'yxatini qo'shish\n"
+        "• `/liststudents` — o'quvchilar ro'yxatini ko'rish\n"
+        "• `/clearstudents` — ro'yxatni tozalash",
+        parse_mode="Markdown"
+    )
 
 # O'QUVCHILAR RO'YXATINI QO'SHISH
 @dp.message(Command("addstudents"))
@@ -623,6 +639,7 @@ async def cmd_stoptest(message: Message):
 @dp.message(F.video | F.forward_from_chat | F.forward_date)
 async def cmd_newtest(message: Message):
     if not await is_admin_of_chat(message):
+        await message.reply("⛔️ Kechirasiz, siz ushbu guruhda Administrator emassiz.")
         return
 
     chat_id = message.chat.id
@@ -668,8 +685,8 @@ async def cmd_newtest(message: Message):
     questions = await generate_quiz_with_gemini(content if content else title, video_bytes=video_bytes)
 
     if not questions:
-        await status_msg.edit_text("❌ Savollarni tuzishda xatolik yuz berdi. Mavzuni matn ko'rinishida yozib ko'ring.")
-        await asyncio.sleep(7)
+        await status_msg.edit_text("❌ Savollarni tuzishda xatolik yuz berdi. Dars mavzusini aniqroq matn ko'rinishida yozib ko'ring.")
+        await asyncio.sleep(10)
         try:
             await status_msg.delete()
         except Exception:
