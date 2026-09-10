@@ -91,7 +91,6 @@ def init_db():
 
 init_db()
 
-# FAQAT USHBU GURUH ADMINISTRATORLARINI TEKSHIRISH
 async def is_admin_of_chat(message: Message) -> bool:
     if not message.from_user:
         return False
@@ -161,7 +160,6 @@ def parse_newtest_command(text: str):
 
     return text[:30].strip(), text, start_time_str, duration_seconds
 
-# GEMINI FILES API ORQALI VIDEONI YUKLASH
 async def upload_file_bytes_to_gemini(session, file_bytes: bytes, mime_type="video/mp4") -> str:
     try:
         init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
@@ -376,7 +374,6 @@ def format_reminder_text(stats: dict, reminder_num: int):
 
     return text
 
-# TESTNI TO'XTATISH VA BARCHA SAVOLLARNI YOPISH
 async def close_test_polls(test_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -409,7 +406,6 @@ async def close_test_polls(test_id: int, chat_id: int):
         except Exception:
             pass
 
-# TESTNI REJALASHTIRILGAN VAQTDA YUBORISH
 async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_title: str, questions: list, delay: int, duration_seconds: int):
     if delay > 0:
         await asyncio.sleep(delay)
@@ -475,7 +471,6 @@ async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_
     await asyncio.sleep(step)
     await close_test_polls(test_id, chat_id)
 
-# O'QUVCHILAR RO'YXATINI QO'SHISH
 @dp.message(Command("addstudents"))
 async def cmd_addstudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -535,7 +530,6 @@ async def cmd_addstudents(message: Message):
     except Exception:
         pass
 
-# RO'YXATNI KO'RISH
 @dp.message(Command("liststudents"))
 async def cmd_liststudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -560,7 +554,6 @@ async def cmd_liststudents(message: Message):
 
     await bot.send_message(chat_id, text, parse_mode="Markdown", message_thread_id=thread_id)
 
-# RO'YXATNI TOZALASH
 @dp.message(Command("clearstudents"))
 async def cmd_clearstudents(message: Message):
     if not await is_admin_of_chat(message):
@@ -586,7 +579,6 @@ async def cmd_clearstudents(message: Message):
     except Exception:
         pass
 
-# TESTNI TO'XTATISH VA YOPISH
 @dp.message(Command("stoptest", "stop"))
 async def cmd_stoptest(message: Message):
     if not await is_admin_of_chat(message):
@@ -620,7 +612,6 @@ async def cmd_stoptest(message: Message):
     test_id = row[0]
     await close_test_polls(test_id, chat_id)
 
-# FORWARD QILINGAN VIDEO YOKI POSTDAN TEST TUZISH VA YANGI TEST
 @dp.message(Command("newtest"))
 @dp.message(F.video | F.forward_from_chat | F.forward_date)
 async def cmd_newtest(message: Message):
@@ -751,7 +742,6 @@ async def handle_poll_answer(poll_answer: PollAnswer):
         """, (student_id, poll_id, test_id, chat_id, chosen_option, is_correct))
         conn.commit()
 
-# STATISTIKANI KO'RISH
 @dp.message(Command("stat"))
 async def cmd_stat(message: Message):
     if not await is_admin_of_chat(message):
