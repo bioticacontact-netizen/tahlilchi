@@ -16,7 +16,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 # ==================== SOZLAMALAR ====================
 BOT_TOKEN = "8047123416:AAHmsDiUyZN2Qwzqa1wO_0r_XQT61qaiOjM"
-GEMINI_API_KEY = "AQ.Ab8RN6IIFwhKV3ZfYGpaygWn6y9aF4HuxPZfGZGVYq5dWanMhA"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 BASE_WEBHOOK_URL = "https://biotica-edu-bot.onrender.com"
 # ====================================================
