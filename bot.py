@@ -5,6 +5,7 @@ import sqlite3
 import re
 import os
 from datetime import datetime, timedelta
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 import aiohttp
 from aiohttp import web
@@ -757,3 +758,35 @@ def main():
 if __name__ == "__main__":
     init_db()
     main()
+# ==================== WEBHOOK SOZLAMALARI ====================
+WEBHOOK_PATH = "/webhook"
+# Render havolangiz yoki domeningizni yozing:
+BASE_WEBHOOK_URL = "https://tahlilchi-1.onrender.com" 
+
+async def on_startup(bot: Bot) -> None:
+    await bot.set_webhook(f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}", drop_pending_updates=True)
+
+async def handle_ping(request):
+    return web.Response(text="Biotica Edu Bot is running perfectly via Webhook!")
+
+def main():
+    init_db()
+    dp.startup.register(on_startup)
+
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+
+    port = int(os.environ.get("PORT", 8080))
+    print(f"Webhook server {port}-portda ishga tushirildi...")
+    web.run_app(app, host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    main()
+    
