@@ -3,30 +3,23 @@ import json
 import logging
 import sqlite3
 import re
+import io
 import os
 from datetime import datetime, timedelta
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 import aiohttp
 from aiohttp import web
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, PollAnswer
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# ==================== SIZNING SOZLAMALARINGIZ ====================
+# ==================== SOZLAMALAR ====================
 BOT_TOKEN = "8047123416:AAHmsDiUyZN2Qwzqa1wO_0r_XQT61qaiOjM"
-GEMINI_API_KEY = "AQ.Ab8RN6Jsk4Fh0uiI1wJ2kvSovfYvMCh-jd7LehJy2-gvz6em-A"
-
-# Webhook manzili (Buni Render'dagi Environment Variables'ga qo'shasiz)
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://your-app-url.com") 
+GEMINI_API_KEY = "AQ.Ab8RN6IIFwhKV3ZfYGpaygWn6y9aF4HuxPZfGZGVYq5dWanMhA"
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-
-# Veb-server porti (Render avtomatik belgilaydi)
-WEBAPP_HOST = "0.0.0.0"
-WEBAPP_PORT = int(os.getenv("PORT", 8080))
-# =================================================================
+BASE_WEBHOOK_URL = "https://biotica-edu-bot.onrender.com"
+# ====================================================
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -99,8 +92,11 @@ def init_db():
             pass
         conn.commit()
 
-# FAQAT USHBU GURUH ADMINISTRATORLARINI TEKSHIRISH
+init_db()
+
 async def is_admin_of_chat(message: Message) -> bool:
+    if message.sender_chat and message.chat and message.sender_chat.id == message.chat.id:
+        return True
     if not message.from_user:
         return False
     if message.chat.type in ["group", "supergroup"]:
@@ -108,7 +104,7 @@ async def is_admin_of_chat(message: Message) -> bool:
             member = await bot.get_chat_member(message.chat.id, message.from_user.id)
             return member.status in ["creator", "administrator"]
         except Exception:
-            return False
+            return True
     return True
 
 def calculate_delay_seconds(time_str: str) -> int:
@@ -158,8 +154,8 @@ def parse_newtest_command(text: str):
         return title, content, start_time_str, duration_seconds
 
     if "|" in text:
-        pts = text.split("|", 1)
-        return pts[0].strip(), pts.strip(), start_time_str, duration_seconds
+        part_one, part_two = text.split("|", 1)
+        return part_one.strip(), part_two.strip(), start_time_str, duration_seconds
 
     m_link = re.search(r'(https?://\S+)', text)
     if m_link:
@@ -169,71 +165,65 @@ def parse_newtest_command(text: str):
 
     return text[:30].strip(), text, start_time_str, duration_seconds
 
-async def generate_quiz_with_gemini(topic_or_text: str):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={GEMINI_API_KEY}"
-    yt_match = re.search(r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=[a-zA-Z0-9_-]+|youtu\.be/[a-zA-Z0-9_-]+)[^\s]*)', topic_or_text)
-    parts = []
+def parse_gemini_json(text: str):
+    m = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    clean = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+    return json.loads(clean)
 
-    if yt_match:
-        yt_url = yt_match.group(1).replace("youtu.be/", "www.youtube.com/watch?v=")
-        parts.append({"fileData": {"fileUri": yt_url, "mimeType": "video/*"}})
-        prompt = """
-Siz professional o'qituvchi va metodistsiz. Taqdim etilgan videoni to'liq ko'rib chiqib, unda aytilgan asosiy faktlar, qoidalar va tushunchalar asosida 5 ta sifatli test (viktorina) savolini tuzing.
+async def generate_quiz_with_gemini(topic_or_text: str, video_bytes: bytes = None):
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json"
+    }
+    connector = aiohttp.TCPConnector(ssl=False)
+    timeout = aiohttp.ClientTimeout(total=120)
 
-Qoidalar:
-1. Har bir savolda 4 ta variant (options) bo'lsin.
-2. Har bir savol uchun faqat 1 ta to'g'ri javob indeksi (0, 1, 2 yoki 3) ko'rsatilsin (correct_option_id).
-3. Savol matni 250 belgidan, har bir variant 100 belgidan oshmasin.
-4. Javobni FAQAT quyidagi toza JSON formatida qaytaring:
-[
-  {
-    "question": "Savol matni...",
-    "options": ["Variant A", "Variant B", "Variant C", "Variant D"],
-    "correct_option_id": 0
-  }
-]
-"""
-        parts.append({"text": prompt})
-    else:
-        prompt = f"""
-Siz professional o'qituvchi va metodistsiz. Quyidagi mavzu/dars matni asosida 5 ta sifatli test (viktorina) savolini tuzing.
-
-Mavzu/dars:
-{topic_or_text}
+    clean_topic = re.sub(r'https?://\S+', '', topic_or_text).strip(" |:-") or topic_or_text
+    prompt = f"""
+Siz professional o'qituvchisiz. Quyidagi mavzu bo'yicha 5 ta sifatli test savolini tuzing.
+Mavzu: {clean_topic}
 
 Qoidalar:
 1. Har bir savolda 4 ta variant (options) bo'lsin.
 2. Har bir savol uchun faqat 1 ta to'g'ri javob indeksi (0, 1, 2 yoki 3) ko'rsatilsin (correct_option_id).
-3. Savol matni 250 belgidan, har bir variant 100 belgidan oshmasin.
-4. Javobni FAQAT quyidagi toza JSON formatida qaytaring:
+3. Javobni FAQAT toza JSON formatida qaytaring:
 [
   {{
     "question": "Savol matni...",
-    "options": ["Variant A", "Variant B", "Variant C", "Variant D"],
+    "options": ["A", "B", "C", "D"],
     "correct_option_id": 0
   }}
 ]
 """
-        parts.append({"text": prompt})
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    candidate_models = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
 
-    payload = {"contents": [{"parts": parts}]}
-    connector = aiohttp.TCPConnector(ssl=False)
-    timeout = aiohttp.ClientTimeout(total=90)
-
-    try:
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    err_text = await resp.text()
-                    logging.error(f"Gemini API xatosi: {resp.status} - {err_text}")
-                    return None
-                data = await resp.json()
-                raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-                clean_json = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
-                return json.loads(clean_json)
-    except Exception as e:
-        logging.error(f"Gemini so'rovida xatolik: {e}")
-        return None
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        for model in candidate_models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            for attempt in range(1, 4):
+                try:
+                    async with session.post(url, headers=headers, json=payload) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+                            return parse_gemini_json(raw_text)
+                        elif resp.status in [503, 429]:
+                            logging.warning(f"{model} modelida {resp.status} yuklama, {attempt}-urinish. 2.5 soniya kutilmoqda...")
+                            await asyncio.sleep(2.5)
+                            continue
+                        else:
+                            break
+                except Exception as e:
+                    logging.warning(f"{model} so'rovida xato: {e}")
+                    await asyncio.sleep(2)
+                    continue
+    return None
 
 def get_test_stats(test_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
@@ -424,14 +414,12 @@ async def run_scheduled_test(test_id: int, chat_id: int, thread_id: int, lesson_
     await asyncio.sleep(step)
     await close_test_polls(test_id, chat_id)
 
-
-# BOT BUYRUQLARI QISMI
 @dp.message(Command("start", "help"))
 async def cmd_start(message: Message):
     await message.reply(
         "👋 **Assalomu alaykum!**\n\n"
         "Men **Biotica Edu** o'quv-nazorat va test tizimi botiman.\n\n"
-        "✅ **Bot Webhook rejimida 24/7 faol ishlamoqda!**\n\n"
+        "✅ **Bot serverda 24/7 faol ishlamoqda!**\n\n"
         "📌 **Asosiy buyruqlar (Guruh adminlari uchun):**\n"
         "• `/newtest <Dars nomi> | muddat: 3h | Mavzu...` — yangi test boshlash\n"
         "• `/stat` — statistika va natijalarni ko'rish\n"
@@ -584,28 +572,40 @@ async def cmd_stoptest(message: Message):
     await close_test_polls(test_id, chat_id)
 
 @dp.message(Command("newtest"))
+@dp.message(F.video | F.forward_from_chat | F.forward_date)
 async def cmd_newtest(message: Message):
     if not await is_admin_of_chat(message):
-        await message.reply("⛔️ Bu buyruqdan faqat guruh administratorlari foydalanishi mumkin.")
+        await message.reply("⛔️ Kechirasiz, siz ushbu guruhda Administrator emassiz.")
         return
 
     chat_id = message.chat.id
     thread_id = message.message_thread_id
     if message.chat.type not in ["group", "supergroup"]:
-        await message.reply("⚠️ Iltimos, `/newtest` buyrug'ini test o'tkazmoqchi bo'lgan guruhingiz va topikingiz ichida yozing.")
+        await message.reply("⚠️ Iltimos, testni guruhingiz va topikingiz ichida boshlang.")
         return
 
-    raw_text = message.text.replace("/newtest", "").strip()
+    raw_text = (message.caption or message.text or "").strip()
+    raw_text = raw_text.replace("/newtest", "").strip()
+
+    title, content, start_time_str, duration_seconds = parse_newtest_command(raw_text)
+
+    status_msg = await bot.send_message(chat_id, f"⏳ Gemini **«{title}»** testi savollarini tayyorlamoqda...", message_thread_id=thread_id)
 
     try:
         await message.delete()
     except Exception:
         pass
 
-    if not raw_text:
-        return
+    questions = await generate_quiz_with_gemini(content if content else title)
 
-    title, content, start_time_str, duration_seconds = parse_newtest_command(raw_text)
+    if not questions:
+        await status_msg.edit_text("❌ Savollarni tuzishda xatolik yuz berdi. Dars mavzusini matn ko'rinishida yozib ko'ring.")
+        await asyncio.sleep(10)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        return
 
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -613,29 +613,13 @@ async def cmd_newtest(message: Message):
             cursor.execute("UPDATE tests SET is_active = 0 WHERE chat_id = ? AND thread_id = ? AND is_active = 1", (chat_id, thread_id))
         else:
             cursor.execute("UPDATE tests SET is_active = 0 WHERE chat_id = ? AND is_active = 1", (chat_id,))
-        conn.commit()
-
-    status_msg = await bot.send_message(chat_id, f"⏳ Gemini **«{title}»** testi savollarini tayyorlamoqda...", message_thread_id=thread_id)
-    questions = await generate_quiz_with_gemini(content if content else title)
-
-    if not questions:
-        await status_msg.edit_text("❌ Savollarni tuzishda xatolik yuz berdi. Dars mavzusini matn ko'rinishida yozib ko'ring.")
-        await asyncio.sleep(7)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        return
-
-    delay = calculate_delay_seconds(start_time_str) if start_time_str else 0
-
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
         cursor.execute("INSERT INTO tests (chat_id, thread_id, title, total_questions, duration_seconds) VALUES (?, ?, ?, ?, ?)", (chat_id, thread_id, title, len(questions), duration_seconds))
         test_id = cursor.lastrowid
         conn.commit()
 
+    delay = calculate_delay_seconds(start_time_str) if start_time_str else 0
     dur_hours = duration_seconds // 3600
+
     if delay > 0:
         await status_msg.edit_text(
             f"✅ **«{title}» testi ushbu topik uchun muvaffaqiyatli rejalashtirildi!**\n\n"
@@ -722,55 +706,13 @@ async def cmd_stat(message: Message):
         report = format_reminder_text(stats, reminder_num=1)
         await bot.send_message(chat_id, report, message_thread_id=thread_id)
 
-
-# ==================== WEBHOOK VA VEB-SERVER SOZLAMALARI ====================
-async def on_startup(bot: Bot):
-    await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"Webhook o'rnatildi: {WEBHOOK_URL}")
-
-async def on_shutdown(bot: Bot):
-    logging.info("Bot to'xtatilmoqda. Webhook tozalanmoqda...")
-    await bot.delete_webhook()
-
-async def handle_ping(request):
-    return web.Response(text="Biotica Edu Bot is running perfectly via Webhook!")
-
-def main():
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-
-    setup_application(app, dp, bot=bot)
-
-    logging.info(f"Veb-server ishga tushirildi: http://{WEBAPP_HOST}:{WEBAPP_PORT}")
-    
-    # LONG POLLING (dp.start_polling) EMAS, WEBHOOK SERVER ISHLAYDI
-    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
-
-if __name__ == "__main__":
-    init_db()
-    main()
-# ==================== WEBHOOK SOZLAMALARI ====================
-WEBHOOK_PATH = "/webhook"
-# Render havolangiz yoki domeningizni yozing:
-BASE_WEBHOOK_URL = "https://tahlilchi-1.onrender.com" 
-
 async def on_startup(bot: Bot) -> None:
     await bot.set_webhook(f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}", drop_pending_updates=True)
 
 async def handle_ping(request):
-    return web.Response(text="Biotica Edu Bot is running perfectly via Webhook!")
+    return web.Response(text="Biotica Edu Bot is running 24/7 online via Webhook!")
 
 def main():
-    init_db()
     dp.startup.register(on_startup)
 
     app = web.Application()
@@ -784,9 +726,8 @@ def main():
     setup_application(app, dp, bot=bot)
 
     port = int(os.environ.get("PORT", 8080))
-    print(f"Webhook server {port}-portda ishga tushirildi...")
+    print(f"Webhook server {port}-portda ishga tushdi...")
     web.run_app(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
-    
