@@ -181,7 +181,7 @@ async def generate_quiz_with_gemini(topic_or_text: str, video_bytes: bytes = Non
         "Content-Type": "application/json"
     }
     connector = aiohttp.TCPConnector(ssl=False)
-    timeout = aiohttp.ClientTimeout(total=120)
+    timeout = aiohttp.ClientTimeout(total=30)
 
     clean_topic = re.sub(r'https?://\S+', '', topic_or_text).strip(" |:-") or topic_or_text
     prompt = f"""
@@ -201,28 +201,23 @@ Qoidalar:
 ]
 """
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    candidate_models = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    candidate_models = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"]
 
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            for attempt in range(1, 4):
-                try:
-                    async with session.post(url, headers=headers, json=payload) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-                            return parse_gemini_json(raw_text)
-                        elif resp.status in [503, 429]:
-                            logging.warning(f"{model} modelida {resp.status} yuklama, {attempt}-urinish. 2.5 soniya kutilmoqda...")
-                            await asyncio.sleep(2.5)
-                            continue
-                        else:
-                            break
-                except Exception as e:
-                    logging.warning(f"{model} so'rovida xato: {e}")
-                    await asyncio.sleep(2)
-                    continue
+            try:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+                        res = parse_gemini_json(raw_text)
+                        if res:
+                            return res
+                    else:
+                        logging.warning(f"{model} {resp.status} qaytardi, darhol navbatdagisiga o'tilmoqda...")
+            except Exception as e:
+                logging.warning(f"{model} so'rovida xato: {e}")
     return None
 
 def get_test_stats(test_id: int, chat_id: int):
